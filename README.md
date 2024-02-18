@@ -1,0 +1,1 @@
+Li, R., Leiva, C., Lemer, S., Kirkendale, L., & Li, J.  (n.d.). Photosymbiosis profoundly influenced animal genome architecture and gene evolution – Insights from the giant clam genome. Manuscript submitted for publication.
