@@ -1,0 +1,101 @@
+########
+# PSMC #
+########
+
+#In order to run PSMC from the chimeric Hi-C reads, we have to map the R1 and R2 reads independently to the genome, and then merge the mapping files.
+
+#Clean and trim raw reads with fastp:
+
+$FASTP -i $INDIR/DTG-OmniC-155_R1_001.fastq.gz -I $INDIR/DTG-OmniC-155_R2_001.fastq.gz -o $CLEANDIR/Tridacna_trim_R1_001.fastq.gz -O $CLEANDIR/Tridacna_trim_R2_001.fastq.gz --cut_right --correction --adapter_sequence=GATCGGAAGAGCACACGTCTGAACTCCAGTCACCAACGAAATCTCGTATGCCGTCTTCTGCTTGAAAAAA --adapter_sequence_r2=GATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTAGATCTCGGTGGTCGCCGTATCATTAAAAAA &&
+
+#Map R1 and R2 clean reads independently to the reference genome:
+
+bwa mem -t 20 $REFERENCE $CLEANDIR/Tridacna_trim_R1_001.fastq.gz | samtools sort -@20 -O bam -o $MAPDIR/Tmax_R1_sorted.bam
+
+bwa mem -t 20 $REFERENCE $CLEANDIR/Tridacna_trim_R2_001.fastq.gz | samtools sort -@20 -O bam -o $MAPDIR/Tmax_R2_sorted.bam
+
+
+#Merge mappings and assess the average depth, needed for PSMC:
+
+samtools merge $MERGEDIR/Tmax_merged_sorted.bam -@20 $MAPDIR/Tmax_R1_sorted.bam $MAPDIR/Tmax_R2_sorted.bam
+
+$QUALIMAP bamqc -bam $MERGEDIR/Tmax_merged_sorted.bam -outdir $QUALIMAPDIR -nt 20 --java-mem-size=70G
+
+
+#Run PSMC using minimum depth (d) = 1/3 average depth; and maximum depth (D) = 2*average depth:
+
+bash Tridacna_BAM_to_psmc_plot_auto_100bootstrap.sh -i Tmax_merged_sorted -d 15 -D 90 -q 20
+
+
+#########################################
+# IMPROVED ANNOTATION WITH RNAseq READS #
+#########################################
+
+#1) Download every fastq for every RNAseq experiment ever in Tridacna maxima.
+
+
+#2) Make a STAR index for the genome file, using your existing annotations (gtf file):
+
+$STAR --runThreadN 8 --runMode genomeGenerate --genomeDir $ANNOTATION --genomeFastaFiles PO1429_Tridacna_maxima.RepeatMasked.fasta --sjdbGTFfile $ANNOTATION/Tmaxima.gtf --genomeChrBinNbits 14 --limitGenomeGenerateRAM 201877951872
+
+
+#3) Mapping and strigtie loop:
+
+for SAMPLE in `cat $PREFIXSAMPLELIST`; do
+
+$STAR --genomeDir $ANNOTATION/STAR_index --runThreadN 8 --quantMode GeneCounts --outSAMtype BAM SortedByCoordinate --outSAMstrandField intronMotif --readFilesCommand zcat --outFilterMatchNminOverLread 0.1 --outFilterScoreMinOverLread 0.1 --outFilterMultimapNmax 1 --limitBAMsortRAM 60000000000 --readFilesIn $READS/$SAMPLE
+
+$STRIGTIE $MAPDIR/$SAMPLE'Aligned.sortedByCoord.out.bam' -v -o $GTFDIR/$SAMPLE'.gtf' -p 30
+
+done
+
+
+#4) Merge all RNAseq gtf annotations:
+
+$STRINGTIE --merge -p 32 -o $OUTDIR/Tmaxima_RNA.gtf $GTFLIST
+
+
+#5) Follow TransDecoder pipeline to get CDS from gtf annotations: https://github.com/TransDecoder/TransDecoder/wiki
+
+
+#6) Merge annotations from RNA with the ab initio annotations using agat:
+
+agat_sp_merge_annotations.pl --gff PO1429_Tridacna_maxima.annotation.sort.gff --gff transcripts.fasta.transdecoder.genome.sort.gff3 --out Tmax_merged.gff
+
+
+#7) Keep the longest isoform and translate to proteins:
+
+agat_sp_keep_longest_isoform.pl -gff Tmax_merged.gff -o Tmax_merged_longestisoform.gff
+
+$TRANSDECODER/util/gff3_file_to_proteins.pl --gff3 Tmax_merged_longestisoform.gff --fasta $REFERENCE > Tmax_merged_longestisoform_prot.fasta
+
+
+################
+# DUPLICATIONS #
+################
+
+#Following: https://github.com/wyp1125/MCScanX
+
+
+#1) Blast all vs all:
+
+makeblastdb -in Tmax_merged_longestisoform_prot.fasta -out ./prot_db_merged/Tmax_merged_prot_db -dbtype prot
+
+$BLASTP -num_threads 30 -max_target_seqs 5 -query Tmax_merged_longestisoform_prot.fasta -db ./prot_db_merged/Tmax_merged_prot_db -outfmt 6 -out $OUTDIR/xyz.blast -evalue 1e-10
+
+
+#2) Prepare gff file for MCScanX:
+
+zcat Tmax_merged_longestisoform.gff.gz | \
+awk 'BEGIN {OFS = "\t"};{if ($3=="gene") print  $1,$4-1,$5,$9}' > tm.gff 
+
+
+#3) Run MCScanX and classify the duplications:
+
+$MCSCAN/MCScanX ./mcscanx/tm
+
+$MCSCAN/duplicate_gene_classifier ./mcscanx/tm
+
+
+#4) Run a GSEA with PANNZER2 annotations as background (http://ekhidna2.biocenter.helsinki.fi/sanspanz/), using the PlantNGSTools R package (https://github.com/biomarble/PlantNGSTools)
+
